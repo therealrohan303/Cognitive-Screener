@@ -1,0 +1,10 @@
+streamlit
+spacy
+nltk
+textstat
+sentence-transformers
+transformers
+openai
+matplotlib
+seaborn
+pandas
