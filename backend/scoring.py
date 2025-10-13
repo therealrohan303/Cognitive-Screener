@@ -1,56 +1,65 @@
 import pandas as pd
+import numpy as np
 
-# Load only once at module level
-df = pd.read_csv('data/feature_dataset.csv')
-healthy_df = df[df['label'] == 'healthy']
+# Path to your precomputed baseline dataset
+BASELINE_PATH = 'data/feature_dataset.csv'
 
-# Define which features to include in comparison
-FEATURES = [
-    'word_count', 'sentence_count', 'ttr', 'avg_sentence_length',
-    'pronoun_count', 'noun_count', 'verb_count', 'adjective_count',
-    'semantic_coherence', 'avg_sentiment', 'sentiment_variance'
+# Features to evaluate
+FEATURE_COLUMNS = [
+    'word_count',
+    'sentence_count',
+    'type_token_ratio',
+    'mtld',
+    'avg_sentence_length',
+    'pronoun_count',
+    'first_person_pronouns',
+    'noun_count',
+    'verb_count',
+    'adjective_count',
+    'indefinite_reference_count',
+    'avg_clauses_per_sentence',
+    'parse_tree_depth',
+    'semantic_coherence',
+    'repetition_ratio',
+    'avg_sentiment',
+    'sentiment_variance',
+    'sentiment_range',
 ]
 
-# Compute healthy baselines (mean and std)
-BASELINES = {
-    feature: {
-        'mean': healthy_df[feature].mean(),
-        'std': healthy_df[feature].std()
-    } for feature in FEATURES
-}
+def compare_to_baseline(user_features: dict) -> dict:
+    # Load and filter the baseline dataset
+    df = pd.read_csv(BASELINE_PATH)
+    healthy_df = df[df['label'] == 'healthy']
 
-def compare_to_baseline(user_features: dict):
-    """
-    Compare user feature dictionary to healthy baselines.
-    Returns a dict of z-scores and interpretations.
-    """
     results = {}
-    for feature in FEATURES:
-        mean = BASELINES[feature]['mean']
-        std = BASELINES[feature]['std']
-        user_value = user_features.get(feature, 0)
+    for feature in FEATURE_COLUMNS:
+        if feature not in user_features:
+            continue
 
-        # Handle division-by-zero
-        if std == 0:
+        baseline_mean = healthy_df[feature].mean()
+        baseline_std = healthy_df[feature].std()
+        user_value = user_features[feature]
+
+        # Handle cases where std is 0 to avoid division by zero
+        if baseline_std == 0:
             z_score = 0
         else:
-            z_score = (user_value - mean) / std
+            z_score = (user_value - baseline_mean) / baseline_std
 
-        interpretation = interpret_z_score(z_score)
+        # Verdict based on z-score
+        if abs(z_score) <= 1:
+            verdict = "Typical"
+        elif z_score < -1:
+            verdict = "Below Average"
+        else:
+            verdict = "Above Average"
+
         results[feature] = {
             'value': user_value,
-            'baseline_mean': mean,
+            'baseline_mean': baseline_mean,
             'z_score': z_score,
-            'verdict': interpretation
+            'verdict': verdict
         }
 
     return results
-
-def interpret_z_score(z):
-    if abs(z) < 0.5:
-        return "Normal"
-    elif z >= 0.5:
-        return "Above expected"
-    elif z <= -0.5:
-        return "Below expected"
 

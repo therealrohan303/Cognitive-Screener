@@ -1,11 +1,17 @@
-streamlit
-spacy
-nltk
-textstat
-sentence-transformers
-transformers
-openai
-matplotlib
-seaborn
-pandas
-vaderSentiment
+# Core
+streamlit==1.35.0
+pandas==2.2.2
+numpy==1.26.4
+
+# NLP & Linguistic Features
+spacy==3.7.4
+nltk==3.8.1
+textstat==0.7.3
+vaderSentiment==3.3.2
+
+# Visualization
+matplotlib==3.8.4
+seaborn==0.13.2
+
+# OpenAI API (New SDK Version)
+openai==1.30.1
