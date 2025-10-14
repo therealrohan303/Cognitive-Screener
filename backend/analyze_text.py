@@ -10,13 +10,13 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sentence_transformers import SentenceTransformer, util
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
-# --------- Config ---------
+# Config
 BASE_DIR = "data/simulated_baselines"
 LABELS = ["healthy", "impaired"]
 OUTPUT_CSV = "data/feature_dataset.csv"
 _MAX_SENTENCES = 120
 
-# --------- Model init ---------
+# Model init
 nlp = spacy.load("en_core_web_sm")
 nltk.download("punkt")
 sent_embed = SentenceTransformer("all-MiniLM-L6-v2")
@@ -40,7 +40,6 @@ _TEMPORAL_MARKERS = {
     "next week","next month","next year","ago","earlier","later","now","then"
 }
 
-# --------- Helpers (identical logic to live extractor) ---------
 def _sentence_list(doc):
     sents = [s.text.strip() for s in doc.sents if s.text.strip()]
     return sents[:_MAX_SENTENCES]
@@ -77,10 +76,10 @@ def _semantic_coherence(sentences):
     glob = [util.cos_sim(x, doc_centroid).item() for x in embs]
     return float(np.mean(adj)), float(np.mean(glob)), float(np.std(glob))
 
-def _entities_and_temporal(doc, sentences):
+def _entities_and_temporal(doc, sentences, wc):
     sc = len(sentences)
     if sc == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, None, 0.0, 0, 0.0
 
     by_sent_ents = []
     for s in doc.sents:
@@ -99,21 +98,30 @@ def _entities_and_temporal(doc, sentences):
     entity_consistency_score = float(np.mean(continuity)) if continuity else 0.0
 
     temporal_hits = []
+    markers_total = 0
     for s in sentences:
         s_low = s.lower()
         hits = {m for m in _TEMPORAL_MARKERS if m in s_low}
         temporal_hits.append(hits)
-    switches = sum(1 for i in range(1, sc) if temporal_hits[i] != temporal_hits[i - 1])
-    temporal_stability_score = 1.0 - (switches / (sc - 1)) if sc > 1 else 1.0
-    temporal_density = float(sum(len(h) for h in temporal_hits) / sc)
-    return entity_consistency_score, temporal_stability_score, temporal_density
+        markers_total += len(hits)
 
-def _filler_rate(text, sc):
+    per_100w = (markers_total / max(wc, 1)) * 100.0
+    density = per_100w
+
+    if markers_total < 2 or sc <= 1:
+        temporal_stability_score = None
+    else:
+        switches = sum(1 for i in range(1, sc) if temporal_hits[i] != temporal_hits[i - 1])
+        temporal_stability_score = 1.0 - (switches / (sc - 1))
+
+    return entity_consistency_score, temporal_stability_score, density, markers_total, per_100w
+
+def _fillers_per_100w(text, wc):
     t = text.lower()
     count = 0
     for f in _FILLERS:
         count += len(re.findall(rf"\b{re.escape(f)}\b", t))
-    return (count / sc) if sc else 0.0
+    return (count / max(wc, 1)) * 100.0
 
 def _emotion_metrics(sentences):
     if not sentences:
@@ -121,7 +129,7 @@ def _emotion_metrics(sentences):
     per_sent_probs = []
     labels_ref = None
     for s in sentences:
-        out = _emotion_pipe(s)            # list of list of {label, score}
+        out = _emotion_pipe(s)
         scores = out[0]
         labels = [d["label"] for d in scores]
         probs = np.array([d["score"] for d in scores], dtype=float)
@@ -145,7 +153,6 @@ def _emotion_metrics(sentences):
         "emotion_entropy": emotion_entropy
     }
 
-# --------- Core per-sample feature extraction ---------
 def extract_features(entry):
     text = entry["text"]
     doc = nlp(text)
@@ -154,14 +161,15 @@ def extract_features(entry):
 
     word_count = len(tokens)
     sentence_count = len(sentences)
+    token_count = word_count
 
     ttr, mtld = _lexical_diversity(tokens)
     avg_sentence_length, avg_clauses_per_sentence, simple_sentence_ratio, fragment_rate = _syntax_metrics(doc, sentences, tokens)
     repetition_ratio = _repetition(tokens)
 
     adj_coh, glob_coh_mean, glob_coh_sd = _semantic_coherence(sentences)
-    entity_consistency_score, temporal_stability_score, temporal_density = _entities_and_temporal(doc, sentences)
-    filler_rate = _filler_rate(text, sentence_count)
+    entity_consistency_score, temporal_stability_score, temporal_density_100w, markers_total, temporal_markers_per_100w = _entities_and_temporal(doc, sentences, word_count)
+    fillers_per_100w = _fillers_per_100w(text, word_count)
 
     sentiments = [sentiment_analyzer.polarity_scores(s)["compound"] for s in sentences] if sentences else []
     avg_sentiment = float(np.mean(sentiments)) if sentiments else 0.0
@@ -174,11 +182,18 @@ def extract_features(entry):
     pronoun_count = pos_counts.get("PRON", 0)
     first_person_pronouns = sum(1 for t in doc if t.lower_ in {"i", "me", "my", "mine"})
 
+    # Back-compat keys mapped to normalized values
+    legacy_temporal_density = temporal_markers_per_100w
+    legacy_filler_rate = fillers_per_100w
+
     return {
         "filename": entry["filename"],
         "label": entry["label"],
+
         "word_count": word_count,
         "sentence_count": sentence_count,
+        "token_count": token_count,
+
         "type_token_ratio": ttr,
         "mtld": mtld,
         "avg_sentence_length": avg_sentence_length,
@@ -186,25 +201,33 @@ def extract_features(entry):
         "simple_sentence_ratio": simple_sentence_ratio,
         "fragment_rate": fragment_rate,
         "repetition_ratio": repetition_ratio,
+
         "semantic_coherence": adj_coh,
         "global_coherence_mean": glob_coh_mean,
         "global_coherence_sd": glob_coh_sd,
         "entity_consistency_score": entity_consistency_score,
-        "temporal_stability_score": temporal_stability_score,
-        "temporal_marker_density": temporal_density,
-        "filler_rate": filler_rate,
+
+        "temporal_stability_score": temporal_stability_score,       # None if <2 markers
+        "temporal_markers_per_100w": temporal_markers_per_100w,     # normalized
+        "fillers_per_100w": fillers_per_100w,                       # normalized
+
         "avg_sentiment": avg_sentiment,
         "sentiment_variance": sentiment_variance,
         "sentiment_range": sentiment_range,
+
         "emotion_top_1": emo["emotion_top_1"],
         "emotion_top_2": emo["emotion_top_2"],
         "emotion_volatility": emo["emotion_volatility"],
         "emotion_entropy": emo["emotion_entropy"],
+
         "pronoun_count": pronoun_count,
-        "first_person_pronouns": first_person_pronouns
+        "first_person_pronouns": first_person_pronouns,
+
+        # Legacy names (safe during transition)
+        "temporal_marker_density": legacy_temporal_density,
+        "filler_rate": legacy_filler_rate,
     }
 
-# --------- IO ---------
 def read_samples():
     data = []
     for label in LABELS:
