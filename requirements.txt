@@ -8,10 +8,21 @@ spacy==3.7.4
 nltk==3.8.1
 textstat==0.7.3
 vaderSentiment==3.3.2
+lexicalrichness==0.1.4
+
+# Embeddings / Transformers
+sentence-transformers==2.6.1
+transformers==4.41.1
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
 
 # Visualization
 matplotlib==3.8.4
 seaborn==0.13.2
 
-# OpenAI API (New SDK Version)
+# OpenAI API (New SDK)
 openai==1.30.1
+httpx>=0.27.0,<0.28.0
+httpcore>=1.0.0,<2.0.0
+
