@@ -3,6 +3,7 @@ import numpy as np
 
 BASELINE_PATH = "data/feature_dataset.csv"
 
+# All numeric features we can score (must exist in baseline + user dict)
 FEATURE_COLUMNS = [
     "word_count",
     "sentence_count",
@@ -29,20 +30,24 @@ FEATURE_COLUMNS = [
     "first_person_pronouns",
 ]
 
-COGNITIVE_WEIGHTS = {
-    "semantic_coherence":       0.18,
-    "global_coherence_mean":    0.14,
-    "global_coherence_sd":      0.06,
-    "entity_consistency_score": 0.08,
-    "temporal_stability_score": 0.06,
-    "type_token_ratio":         0.07,
-    "mtld":                     0.07,
-    "avg_clauses_per_sentence": 0.08,
-    "simple_sentence_ratio":    0.06,
-    "fragment_rate":            0.06,
-    "repetition_ratio":         0.06,
-    "fillers_per_100w":         0.04,
-    "temporal_markers_per_100w":0.04,
+# --- Group weights (sum to 1.0 within each group) ---
+FOCUS_WEIGHTS = {
+    "semantic_coherence":       0.34,
+    "global_coherence_mean":    0.26,
+    "global_coherence_sd":      0.12,  # using |z| handles both directions
+    "entity_consistency_score": 0.16,
+    "temporal_stability_score": 0.12,
+}
+
+STRUCTURE_WEIGHTS = {
+    "type_token_ratio":         0.14,
+    "mtld":                     0.14,
+    "avg_clauses_per_sentence": 0.18,
+    "simple_sentence_ratio":    0.14,
+    "fragment_rate":            0.14,
+    "repetition_ratio":         0.14,
+    "fillers_per_100w":         0.06,
+    "temporal_markers_per_100w":0.06,
 }
 
 EMOTION_WEIGHTS = {
@@ -52,6 +57,9 @@ EMOTION_WEIGHTS = {
     "sentiment_range":     0.12,
     "avg_sentiment":       0.08,
 }
+
+# Features we never flag on (too basic/length-dependent)
+DO_NOT_FLAG = {"word_count", "sentence_count", "pronoun_count", "first_person_pronouns"}
 
 def _robust_z(user_value: float, series: pd.Series) -> float:
     s = pd.to_numeric(series, errors="coerce").dropna()
@@ -66,9 +74,9 @@ def _robust_z(user_value: float, series: pd.Series) -> float:
     z = (float(user_value) - mean) / denom
     return float(np.clip(z, -3.0, 3.0))
 
-def _verdict_from_z(z: float, confidence: str) -> str:
+def _verdict_from_z(z: float, confidence_label: str) -> str:
     az = abs(z)
-    if confidence == "Low" and az > 1.0:
+    if confidence_label == "Low" and az > 1.0:
         return "Preliminary signal"
     if az <= 1.0:
         return "Typical"
@@ -78,18 +86,27 @@ def _verdict_from_z(z: float, confidence: str) -> str:
         return "Moderate deviation"
     return "Strong deviation"
 
-def _composite_from_abs_z(abs_z_map: dict, weights: dict) -> float:
+def _mean_abs_z(abs_z_map: dict, keys_and_weights: dict) -> float:
     total = 0.0
     wsum = 0.0
-    for k, w in weights.items():
+    for k, w in keys_and_weights.items():
         if k in abs_z_map and np.isfinite(abs_z_map[k]):
             total += w * abs_z_map[k]
             wsum += w
-    if wsum == 0:
-        return 100.0
-    mean_abs_z = total / wsum
-    score = 100.0 * float(np.exp(-mean_abs_z / 2.0))
-    return float(np.clip(score, 0.0, 100.0))
+    return (total / wsum) if wsum > 0 else 0.0
+
+def _score_from_mean_abs_z(mean_abs_z: float) -> float:
+    # 100 * exp(-|z|/2): |z|≈0→~100, |z|≈1→~60.7, |z|≈2→~36.8
+    return float(np.clip(100.0 * np.exp(-mean_abs_z / 2.0), 0.0, 100.0))
+
+def _grade_from_score(score: float) -> str:
+    if score >= 80.0:
+        return "A"
+    if score >= 60.0:
+        return "B"
+    if score >= 40.0:
+        return "C"
+    return "D"
 
 def _confidence_from_tokens(token_count: int) -> dict:
     if token_count is None or token_count < 50:
@@ -108,11 +125,12 @@ def compare_to_baseline(user_features: dict) -> dict:
     confidence = _confidence_from_tokens(token_count)
 
     results = {}
-    abs_z_for_composites = {}
+    abs_z_for_groups = {}
 
     for feature in FEATURE_COLUMNS:
         if feature not in user_features or feature not in healthy_df.columns:
             continue
+
         series = healthy_df[feature]
         user_value = user_features[feature]
 
@@ -135,7 +153,7 @@ def compare_to_baseline(user_features: dict) -> dict:
                 "z_score": float(z),
                 "verdict": verdict,
             }
-            abs_z_for_composites[feature] = abs(float(z))
+            abs_z_for_groups[feature] = abs(float(z))
         else:
             results[feature] = {
                 "value": user_value,
@@ -144,14 +162,29 @@ def compare_to_baseline(user_features: dict) -> dict:
                 "verdict": "N/A",
             }
 
-    cognitive_abs_z = {k: v for k, v in abs_z_for_composites.items() if k in COGNITIVE_WEIGHTS}
-    emotional_abs_z = {k: v for k, v in abs_z_for_composites.items() if k in EMOTION_WEIGHTS}
+    # Group composites
+    focus_mean_abs = _mean_abs_z(abs_z_for_groups, FOCUS_WEIGHTS)
+    structure_mean_abs = _mean_abs_z(abs_z_for_groups, STRUCTURE_WEIGHTS)
+    emotion_mean_abs = _mean_abs_z(abs_z_for_groups, EMOTION_WEIGHTS)
 
-    cognitive_fluency = _composite_from_abs_z(cognitive_abs_z, COGNITIVE_WEIGHTS)
-    emotional_clarity = _composite_from_abs_z(emotional_abs_z, EMOTION_WEIGHTS)
+    focus_score = _score_from_mean_abs_z(focus_mean_abs)
+    structure_score = _score_from_mean_abs_z(structure_mean_abs)
+    emotion_score = _score_from_mean_abs_z(emotion_mean_abs)
 
+    focus_grade = _grade_from_score(focus_score)
+    structure_grade = _grade_from_score(structure_score)
+    emotion_grade = _grade_from_score(emotion_score)
+
+    # Legacy composites (kept for backward compatibility in UI if needed)
+    # cognitive_fluency ~= average of Focus & Structure scores
+    cognitive_fluency = float(np.mean([focus_score, structure_score]))
+    emotional_clarity = emotion_score
+
+    # Flags (exclude basic counts; tier by deviation; mark preliminary if Low confidence)
     flags = []
     for k, v in results.items():
+        if k in DO_NOT_FLAG:
+            continue
         z = v.get("z_score", 0.0)
         if not np.isfinite(z):
             continue
@@ -168,11 +201,26 @@ def compare_to_baseline(user_features: dict) -> dict:
             level = "⚠️ Preliminary"
         flags.append({"feature": k, "level": level, "z": float(z)})
 
+    # Summary payload
     summary = {
-        "cognitive_fluency": round(float(cognitive_fluency), 1),
-        "emotional_clarity": round(float(emotional_clarity), 1),
+        # New grouped surface
+        "focus_score": round(focus_score, 1),
+        "structure_score": round(structure_score, 1),
+        "emotion_score": round(emotion_score, 1),
+        "focus_grade": focus_grade,
+        "structure_grade": structure_grade,
+        "emotion_grade": emotion_grade,
+
+        # Legacy/composite for compatibility with existing UI pieces
+        "cognitive_fluency": round(cognitive_fluency, 1),
+        "emotional_clarity": round(emotional_clarity, 1),
+
         "confidence": confidence,
-        "flags": sorted(flags, key=lambda x: {"🔴 Strong":3, "🚩 Moderate":2, "⚠️ Minor":1, "⚠️ Preliminary":0}.get(x["level"], 0), reverse=True),
+        "flags": sorted(
+            flags,
+            key=lambda x: {"🔴 Strong": 3, "🚩 Moderate": 2, "⚠️ Minor": 1, "⚠️ Preliminary": 0}.get(x["level"], 0),
+            reverse=True,
+        ),
     }
 
     return {**results, "_summary": summary}
